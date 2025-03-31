@@ -5,6 +5,10 @@ import requests
 from bs4 import BeautifulSoup
 from urllib.parse import urlparse
 import re
+from selenium import webdriver
+from selenium.webdriver.chrome.options import Options
+import time
+import json
 
 # Configure Gemini API
 api_key = os.environ.get("GEMINI_API_KEY")
@@ -20,95 +24,120 @@ genai.configure(api_key=api_key)
 def calculate_health_score(site_data):
     """Calculate detailed health score based on specific metrics with enhanced accuracy"""
     scores = {
-        'conversion': 0,
-        'ux_design': 0,
-        'technical': 0
+        'content': 0,  # Content structure and hierarchy
+        'engagement': 0,  # CTAs and forms
+        'accessibility': 0  # Accessibility and technical
     }
     
-    # Conversion Score (40%)
-    # CTA Analysis - check position, prominence, clarity
-    cta_score = 0
-    if site_data['ctas']['total'] > 0:
-        # Check ratio of prominent CTAs
-        cta_prominence_ratio = site_data['ctas']['prominent'] / site_data['ctas']['total']
-        # Check if CTAs are above fold
-        cta_position_ratio = site_data['ctas']['above_fold'] / site_data['ctas']['total'] if site_data['ctas']['total'] > 0 else 0
-        # Weighted score for CTAs
-        cta_score = (cta_prominence_ratio * 60) + (cta_position_ratio * 40)
-    
-    # Form Analysis - check labels, validation, required fields
-    form_score = 0
-    if site_data['forms']['count'] > 0:
-        form_validations = []
-        for form in site_data['forms']['analysis']:
-            # Check for labels
-            has_labels_score = 30 if form.get('has_labels', False) else 0
-            # Check for field validation
-            validation_score = 30 if form.get('validation', False) else 0
-            # Check required vs total fields ratio
-            field_ratio_score = min(40, (form.get('required_fields', 0) / max(1, form.get('total_fields', 1)) * 40))
-            form_validations.append(has_labels_score + validation_score + field_ratio_score)
-        
-        # Average form scores if multiple forms
-        form_score = sum(form_validations) / len(form_validations) if form_validations else 0
-    
-    scores['conversion'] = (cta_score * 0.6 + form_score * 0.4)
-    
-    # UX Design Score (30%)
-    # Navigation structure
-    nav_elements = 0
-    if site_data['navigation']['main_nav']: 
-        nav_elements += 50
-    if site_data['navigation']['footer_nav']: 
-        nav_elements += 30
-    if site_data['navigation']['breadcrumbs']: 
-        nav_elements += 20
-    
-    # Content structure
+    # Content Structure Score (35%)
     content_score = 0
-    if site_data['content']['headings']['h1'] == 1:
-        content_score += 40  # Exactly one H1
-    if site_data['content']['headings']['h2'] > 0:
-        content_score += 30  # Has H2 headings
+    headings = site_data['content']['headings']
+    paragraphs = site_data['content']['paragraphs']
+    
+    # Heading hierarchy (15 points)
+    if headings['h1'] == 1:
+        content_score += 5  # Exactly one H1
+    if headings['h2'] > 0:
+        content_score += 5  # Has H2 headings
+    if headings.get('h3', 0) > 0:
+        content_score += 5  # Has H3 headings
+    
+    # Heading-to-paragraph ratio (10 points)
+    total_headings = headings['h1'] + headings['h2'] + headings.get('h3', 0)
+    if paragraphs > 0:
+        heading_ratio = total_headings / paragraphs
+        if 0.2 <= heading_ratio <= 0.4:
+            content_score += 10
+        elif 0.1 <= heading_ratio < 0.2:
+            content_score += 5
+    
+    # List structure (10 points)
     if site_data['content']['lists'] > 0:
-        content_score += 15  # Has lists for scannable content
-    if site_data['content']['paragraphs'] > 3:
-        content_score += 15  # Has sufficient paragraph content
+        list_ratio = site_data['content']['lists'] / max(1, paragraphs)
+        if 0.1 <= list_ratio <= 0.3:
+            content_score += 10
+        elif list_ratio > 0:
+            content_score += 5
     
-    scores['ux_design'] = (nav_elements * 0.5 + content_score * 0.5)
+    scores['content'] = content_score
     
-    # Technical Score (30%)
-    # Responsive design
-    responsive_score = 0
-    if site_data['technical']['responsive']['meta_tag']: 
-        responsive_score += 50
-    if site_data['technical']['responsive']['media_queries']: 
-        responsive_score += 50
+    # Engagement Score (35%)
+    engagement_score = 0
     
-    # Performance optimizations
-    perf_score = 0
-    if site_data['technical']['performance'].get('minified_resources', False): 
-        perf_score += 50
-    if site_data['technical']['performance'].get('images_with_lazy', 0) > 0: 
-        perf_score += 50
+    # CTA Analysis (20 points)
+    ctas = site_data['ctas']
+    if ctas['total'] > 0:
+        # Primary CTA ratio (10 points)
+        primary_ratio = ctas['primary'] / ctas['total']
+        if 0.1 <= primary_ratio <= 0.3:
+            engagement_score += 10
+        elif primary_ratio > 0:
+            engagement_score += 5
+        
+        # Above fold placement (10 points)
+        if ctas['above_fold'] > 0:
+            above_fold_ratio = ctas['above_fold'] / ctas['total']
+            if above_fold_ratio >= 0.3:
+                engagement_score += 10
+            else:
+                engagement_score += int(above_fold_ratio * 30)
     
-    # Accessibility considerations
-    access_items = site_data['technical']['accessibility']
-    access_score = 0
-    if access_items.get('alt_texts', 0) > 0: 
-        access_score += 50
-    if access_items.get('aria_labels', 0) > 0: 
-        access_score += 50
+    # Form Analysis (15 points)
+    forms = site_data['forms']
+    if forms['count'] > 0:
+        # Form validation (7.5 points)
+        validation_score = forms['total_validation_score'] * 7.5
+        
+        # Form accessibility (7.5 points)
+        accessibility_score = forms['total_accessibility_score'] * 7.5
+        
+        engagement_score += validation_score + accessibility_score
     
-    scores['technical'] = (responsive_score * 0.4 + perf_score * 0.3 + access_score * 0.3)
+    scores['engagement'] = engagement_score
+    
+    # Accessibility Score (30%)
+    accessibility_score = 0
+    access_data = site_data['technical']['accessibility']
+    
+    # Image alt texts (10 points)
+    if access_data['alt_texts'] > 0:
+        accessibility_score += 10
+    
+    # ARIA attributes (10 points)
+    aria_score = 0
+    if access_data['aria_labels'] > 0:
+        aria_score += 3
+    if access_data['aria_describedby'] > 0:
+        aria_score += 3
+    if access_data['role_attributes'] > 0:
+        aria_score += 2
+    if access_data['lang_attribute']:
+        aria_score += 2
+    accessibility_score += aria_score
+    
+    # Form accessibility (10 points)
+    if forms['count'] > 0:
+        form_access_score = min(10, access_data['form_labels'] * 2)
+        accessibility_score += form_access_score
+    
+    scores['accessibility'] = accessibility_score
     
     # Calculate final score with appropriate weighting
-    final_score = int((scores['conversion'] * 0.4) + 
-                     (scores['ux_design'] * 0.3) + 
-                     (scores['technical'] * 0.3))
+    final_score = int(
+        (scores['content'] * 0.35) +
+        (scores['engagement'] * 0.35) +
+        (scores['accessibility'] * 0.30)
+    )
     
-    # Validation step - make sure the score is within bounds
+    # Ensure score is within bounds
     final_score = max(0, min(100, final_score))
+    
+    # Add detailed scoring information for debugging
+    print(f"Detailed Scores:")
+    print(f"Content Score: {scores['content']}/35")
+    print(f"Engagement Score: {scores['engagement']}/35")
+    print(f"Accessibility Score: {scores['accessibility']}/30")
+    print(f"Final Score: {final_score}/100")
     
     return final_score, scores
 
@@ -123,23 +152,51 @@ def fetch_website_content(url):
         response.raise_for_status()
         soup = BeautifulSoup(response.text, 'html.parser')
         
-        # Enhanced CTA detection
+        # Enhanced CTA detection with visual hierarchy
         cta_patterns = [
             'sign up', 'buy', 'try', 'get', 'start', 'learn more', 'contact', 
             'subscribe', 'download', 'register', 'shop', 'order', 'book'
         ]
         
+        primary_classes = ['primary', 'cta', 'main', 'hero', 'btn-primary', 'button-primary']
+        secondary_classes = ['secondary', 'btn-secondary', 'button-secondary']
+        
         ctas = []
         for elem in soup.find_all(['a', 'button', 'input[type="submit"]']):
             text = elem.get_text().strip().lower()
             classes = ' '.join(elem.get('class', [])).lower()
+            style = elem.get('style', '').lower()
+            
             if any(pattern in text or pattern in classes for pattern in cta_patterns):
-                is_prominent = any(cls in classes for cls in ['primary', 'cta', 'main', 'hero'])
+                # Check visual prominence
+                is_primary = any(cls in classes for cls in primary_classes)
+                is_secondary = any(cls in classes for cls in secondary_classes)
+                has_contrast = 'color' in style or 'background' in style
+                
+                # Calculate prominence score
+                prominence_score = 0
+                if is_primary:
+                    prominence_score += 3
+                if is_secondary:
+                    prominence_score += 2
+                if has_contrast:
+                    prominence_score += 1
+                
+                # Check position
+                is_above_fold = elem.parent and elem.parent.find_previous('h1') is None
+                is_in_hero = any(cls in classes for cls in ['hero', 'banner', 'header'])
+                
                 ctas.append({
                     'text': text,
-                    'prominent': is_prominent,
-                    'location': 'above_fold' if elem.parent and elem.parent.find_previous('h1') is None else 'below_fold'
+                    'prominence_score': prominence_score,
+                    'is_primary': is_primary,
+                    'is_secondary': is_secondary,
+                    'location': 'hero' if is_in_hero else ('above_fold' if is_above_fold else 'below_fold'),
+                    'has_contrast': has_contrast
                 })
+
+        # Sort CTAs by prominence score
+        ctas.sort(key=lambda x: (-x['prominence_score'], x['location'] != 'hero', x['location'] != 'above_fold'))
 
         # Enhanced form analysis
         forms = []
@@ -148,24 +205,89 @@ def fetch_website_content(url):
             required_fields = [f for f in fields if f.get('required') or f.get('aria-required') == 'true']
             labels = form.find_all('label')
             
+            # Enhanced validation and accessibility checks
+            field_analysis = []
+            for field in fields:
+                field_type = field.get('type', 'text')
+                field_id = field.get('id', '')
+                field_name = field.get('name', '')
+                
+                # Find associated label
+                label = None
+                if field_id:
+                    label = form.find('label', {'for': field_id})
+                if not label and field_name:
+                    label = form.find('label', {'for': field_name})
+                
+                # Check validation attributes
+                validations = {
+                    'required': field.get('required') is not None or field.get('aria-required') == 'true',
+                    'pattern': field.get('pattern') is not None,
+                    'minlength': field.get('minlength') is not None,
+                    'maxlength': field.get('maxlength') is not None,
+                    'min': field.get('min') is not None,
+                    'max': field.get('max') is not None,
+                    'step': field.get('step') is not None
+                }
+                
+                # Check accessibility attributes
+                accessibility = {
+                    'has_label': label is not None,
+                    'has_placeholder': field.get('placeholder') is not None,
+                    'has_aria_label': field.get('aria-label') is not None,
+                    'has_aria_describedby': field.get('aria-describedby') is not None,
+                    'has_error_message': bool(form.find(id=field.get('aria-describedby', '')))
+                }
+                
+                field_analysis.append({
+                    'type': field_type,
+                    'validations': validations,
+                    'accessibility': accessibility,
+                    'validation_score': sum(1 for v in validations.values() if v),
+                    'accessibility_score': sum(1 for a in accessibility.values() if a)
+                })
+            
+            # Calculate form scores
+            validation_score = sum(f['validation_score'] for f in field_analysis) / (len(field_analysis) * 3) if field_analysis else 0
+            accessibility_score = sum(f['accessibility_score'] for f in field_analysis) / (len(field_analysis) * 3) if field_analysis else 0
+            
             forms.append({
                 'total_fields': len(fields),
                 'required_fields': len(required_fields),
-                'has_labels': len(labels) > 0,
-                'field_types': [f.get('type', 'text') for f in fields],
-                'validation': bool(form.find('input', {'pattern': True}))
+                'field_analysis': field_analysis,
+                'validation_score': validation_score,
+                'accessibility_score': accessibility_score,
+                'has_submit': bool(form.find(['input', 'button'], {'type': 'submit'})),
+                'has_error_handling': bool(form.find(class_=lambda x: x and any(err in x.lower() for err in ['error', 'invalid', 'alert'])))
             })
+
+        # Enhanced accessibility analysis
+        accessibility_data = {
+            'alt_texts': len([img for img in soup.find_all('img') if img.get('alt')]),
+            'aria_labels': len(soup.find_all(attrs={"aria-label": True})),
+            'aria_describedby': len(soup.find_all(attrs={"aria-describedby": True})),
+            'aria_required': len(soup.find_all(attrs={"aria-required": True})),
+            'role_attributes': len(soup.find_all(attrs={"role": True})),
+            'tab_index': len(soup.find_all(attrs={"tabindex": True})),
+            'lang_attribute': bool(soup.find('html', attrs={"lang": True})),
+            'skip_links': bool(soup.find('a', href="#main-content")),
+            'form_labels': sum(1 for form in forms for field in form['field_analysis'] if field['accessibility']['has_label'])
+        }
 
         return {
             'ctas': {
                 'total': len(ctas),
-                'prominent': len([c for c in ctas if c['prominent']]),
-                'above_fold': len([c for c in ctas if c['location'] == 'above_fold']),
-                'elements': ctas
+                'prominent': len([c for c in ctas if c['prominence_score'] >= 3]),
+                'above_fold': len([c for c in ctas if c['location'] in ['hero', 'above_fold']]),
+                'primary': len([c for c in ctas if c['is_primary']]),
+                'secondary': len([c for c in ctas if c['is_secondary']]),
+                'elements': ctas[:5]  # Return top 5 most prominent CTAs
             },
             'forms': {
                 'count': len(forms),
-                'analysis': forms
+                'analysis': forms,
+                'total_validation_score': sum(form['validation_score'] for form in forms) / len(forms) if forms else 0,
+                'total_accessibility_score': sum(form['accessibility_score'] for form in forms) / len(forms) if forms else 0
             },
             'navigation': {
                 'main_nav': bool(soup.find('nav')),
@@ -186,10 +308,7 @@ def fetch_website_content(url):
                     'images_with_lazy': len([img for img in soup.find_all('img') if img.get('loading') == 'lazy']),
                     'minified_resources': bool(soup.find('link', {'href': re.compile(r'\.min\.')}))
                 },
-                'accessibility': {
-                    'alt_texts': len([img for img in soup.find_all('img') if img.get('alt')]),
-                    'aria_labels': len(soup.find_all(attrs={"aria-label": True}))
-                }
+                'accessibility': accessibility_data
             }
         }
     except Exception as e:
@@ -197,9 +316,9 @@ def fetch_website_content(url):
 
 # Initialize Gemini 2.0 Flash Lite model
 model = genai.GenerativeModel(
-    model_name="gemini-2.0-flash-lite",
+    model_name="gemini-2.0-flash",
     generation_config={
-        "temperature": 0.7,
+        "temperature": 0.2,
         "top_p": 0.9,
         "top_k": 40,
         "max_output_tokens": 2048,
@@ -434,49 +553,77 @@ with st.expander("🔍 Analyze Website", expanded=True):
                 site_data = fetch_website_content(url)
                 
                 # Build analysis prompt
-                prompt = f"""Analyze the UX health score of {url}. Perform a thorough, comprehensive evaluation across all key areas to provide an accurate score similar to a professional UX audit.
+                prompt = f"""
+You are conducting a **detailed, customized website analysis** of {url}.  
+Your primary task is to identify **UNIQUE, SITE-SPECIFIC issues** that are particular to THIS website, not generic UX problems.
 
-                Assess the following key areas with precision:
-                1. Navigation & Structure (25 points):
-                - Navigation structure: {site_data['navigation']}
-                - Content hierarchy: H1: {site_data['content']['headings']['h1']}, H2: {site_data['content']['headings']['h2']}, Lists: {site_data['content']['lists']}
-                - Menu organization and clarity
+🚨 **CRITICAL INSTRUCTIONS:**  
+- NEVER report the same generic issues (like "needs more CTAs" or "missing ARIA labels") that could apply to any website
+- Each insight MUST be unique to {url} and based on specific elements you identify
+- DO NOT mention common issues like CTAs, form validation, or ARIA attributes UNLESS they represent a critical, specific problem on this exact site
+- AVOID template responses - each analysis must be completely customized
 
-                2. Content & Accessibility (25 points):
-                - Content quality: Paragraphs: {site_data['content']['paragraphs']}
-                - Accessibility features: {site_data['technical']['accessibility']}
-                - Readability and information structure
+---
 
-                3. Performance & Technical (25 points):
-                - Responsive design: {site_data['technical']['responsive']}
-                - Performance optimizations: {site_data['technical']['performance']}
-                - Loading speed indicators
-                
-                4. User Engagement & Conversion (25 points):
-                - CTAs: {site_data['ctas']['total']} total, {site_data['ctas']['prominent']} primary, {site_data['ctas']['above_fold']} above fold
-                - Forms and interaction points: {site_data['forms']['analysis']}
-                - User journey clarity
+### **Forensic Analysis Approach:**
+1. **Examine UNIQUE Content Patterns**  
+   - What is unusual or specific about THIS site's content?
+   - How does this specific site handle information hierarchy?
+   - Look for content gaps or unclear messaging SPECIFIC to this business/organization
 
-                First, calculate an accurate UX health score out of 100, where higher scores indicate better UX. Be critical and precise in your evaluation - a score of 90+ should only be given to truly exceptional sites.
+2. **Site-Specific User Journey Evaluation**  
+   - What path would a user take on THIS particular site?
+   - What SPECIFIC interactive elements on THIS site create friction?
+   - Identify conversion obstacles UNIQUE to this site
 
-                VERY IMPORTANT: You MUST provide the UX health score in this EXACT format on its own line:
-                UX_HEALTH_SCORE: [number]
+3. **Custom Interaction Analysis**  
+   - Are there site-specific functionality problems?
+   - Does this particular site have unique navigation challenges?
+   - Examine THIS site's specific implementation of forms, search, or other interactive elements
 
-                Then provide exactly 3 issues in this format:
+4. **Site-Specific Technical Assessment**  
+   - What technical issues affect THIS site that wouldn't apply to others?
+   - Are there performance problems SPECIFIC to this site's implementation?
+   - Identify technical issues unique to this specific site's architecture
 
-                **Issue 1: [Most Critical UX Issue]**
-                Problem: [One specific issue based on metrics]
-                Impact: [High/Medium/Low] - [Quantified impact]
-                Solution: 
-                • [Specific fix 1]
-                • [Specific fix 2]
-                Expected Lift: [Estimate]
+During your analysis, reference these specific metrics ONLY if relevant to a real problem:
+H1: {site_data['content']['headings']['h1']}, H2: {site_data['content']['headings']['h2']}, H3: {site_data['content']['headings']['h3']}
+Paragraphs: {site_data['content']['paragraphs']}, Lists: {site_data['content']['lists']}
+CTAs: {site_data['ctas']['total']} total, {site_data['ctas']['primary']} primary, {site_data['ctas']['above_fold']} above fold
+Forms: Count={site_data['forms']['count']}, Validation={site_data['forms']['total_validation_score']:.2f}/1.0
+Alt texts: {site_data['technical']['accessibility']['alt_texts']}, ARIA: {site_data['technical']['accessibility']['aria_labels']}
 
-                **Issue 2: [Second Issue]**
-                [Same format]
+---
 
-                **Issue 3: [Third Issue]**
-                [Same format]"""
+### **Custom Findings Format:**
+💡 **Step 1: Calculate a UX Health Score (0-100) based on THIS specific website.**  
+**UX_HEALTH_SCORE: [number]**  
+
+💡 **Step 2: Identify 3 COMPLETELY DIFFERENT issues unique to {url}.**  
+Each insight must follow this format but address entirely different aspects of the site:
+
+**Insight 1: [Specific Issue Unique to This Site]**
+- **Observation:** [Describe a specific element or pattern ONLY found on this site]  
+- **Impact:** [High/Medium/Low] – [Explain site-specific consequences]  
+- **Suggested Fix:** 
+  • [Customized solution targeting this specific site's implementation]
+  • [Alternative approach specifically for this site]  
+- **Expected Improvement:** [Explain improvements specific to this site's goals]
+
+**Insight 2: [Different Issue Area - Must Not Overlap With Insight 1]**
+- Must focus on a COMPLETELY DIFFERENT aspect than Insight 1
+- Should examine a different part of the user journey or functionality
+
+**Insight 3: [Third Unique Area - Must Not Overlap With Insights 1 & 2]**
+- Must focus on a COMPLETELY DIFFERENT aspect than Insights 1 & 2
+- Should represent a third distinct problem area
+
+🚨 **ABSOLUTELY CRITICAL:**
+- Your analysis MUST be unique to {url} - mentioning specific pages, elements, content, and functionality by name
+- Each insight MUST address a completely different aspect of the website
+- Insights MUST be based on actual problems, not theoretical issues
+- If you cannot find 3 completely different issues, focus on providing 1-2 GENUINELY unique insights rather than inventing generic problems
+"""
 
                 response = model.generate_content(prompt)
                 if response and response.text:
@@ -522,9 +669,9 @@ with st.expander("🔍 Analyze Website", expanded=True):
                         print(f"Using calculated score: {calculated_score}")
                     
                     # Store analysis content
-                    analysis_content = response_text.split('**Issue')
+                    analysis_content = response_text.split('**Insight')
                     if len(analysis_content) > 1:
-                        st.session_state.analysis_data[url] = '**Issue' + '**Issue'.join(analysis_content[1:])
+                        st.session_state.analysis_data[url] = '**Insight' + '**Insight'.join(analysis_content[1:])
                         st.success("Analysis complete")
                     else:
                         st.error("Failed to generate proper analysis format")
@@ -538,39 +685,96 @@ with st.expander("🔍 Analyze Website", expanded=True):
                 st.stop()
 
 def display_issue_card(issue_content, index):
-    """Improved issue card display with better formatting"""
+    """Improved issue card display with better parsing and formatting"""
     lines = issue_content.split('\n')
-    title = lines[0].replace('**', '').strip() if lines else "Issue"
+    title = lines[0].replace('**', '').strip() if lines else "Insight"
     
-    # Parse sections with improved handling
+    # Parse sections with improved handling for the new format
     sections = {
-        'problem': '',
+        'observation': '',
         'impact': '',
-        'solution': [],
-        'expected_lift': ''
+        'suggested_fix': [],
+        'expected_improvement': ''
     }
     
     current_section = None
-    for line in lines[1:]:  # Skip title line
+    for i, line in enumerate(lines[1:]):  # Skip title line
         line = line.strip()
         if not line:
             continue
             
-        if line.startswith('Problem:'):
-            current_section = 'problem'
-            sections['problem'] = line.replace('Problem:', '').strip()
-        elif line.startswith('Impact:'):
+        # More robust section detection
+        if re.search(r'(?i)\*?\*?observation\s*:|\bObservation\b', line):
+            current_section = 'observation'
+            sections['observation'] = re.sub(r'(?i)\*?\*?observation\s*:|^\s*-\s*\*?\*?observation\s*:', '', line).strip()
+            # If observation is empty, check next line
+            if not sections['observation'] and i+2 < len(lines):
+                sections['observation'] = lines[i+2].strip()
+                
+        elif re.search(r'(?i)\*?\*?impact\s*:|\bImpact\b', line):
             current_section = 'impact'
-            sections['impact'] = line.replace('Impact:', '').strip()
-        elif line.startswith('Solution:'):
-            current_section = 'solution'
-        elif line.startswith('Expected Lift:'):
-            current_section = 'expected_lift'
-            sections['expected_lift'] = line.replace('Expected Lift:', '').strip()
-        elif line.startswith('•') and current_section == 'solution':
-            sections['solution'].append(line.replace('•', '').strip())
-        elif current_section == 'solution' and line:
-            sections['solution'].append(line.strip())
+            sections['impact'] = re.sub(r'(?i)\*?\*?impact\s*:|^\s*-\s*\*?\*?impact\s*:', '', line).strip()
+            
+        elif re.search(r'(?i)\*?\*?suggested\s*fix\s*:|^\s*-\s*\*?\*?suggested\s*fix', line):
+            current_section = 'suggested_fix'
+            # Don't add the section header to the content
+            
+        elif re.search(r'(?i)\*?\*?expected\s*improvement\s*:|^\s*-\s*\*?\*?expected\s*improvement', line):
+            current_section = 'expected_improvement'
+            sections['expected_improvement'] = re.sub(r'(?i)\*?\*?expected\s*improvement\s*:|^\s*-\s*\*?\*?expected\s*improvement\s*:', '', line).strip()
+            
+        # Content handling for current section
+        elif current_section == 'observation' and not sections['observation']:
+            sections['observation'] = line
+            
+        elif current_section == 'impact' and not sections['impact']:
+            sections['impact'] = line
+            
+        elif current_section == 'suggested_fix':
+            # Handle bullet points and regular lines
+            if line.startswith('•') or line.startswith('-') or re.match(r'^\d+\.', line):
+                cleaned_line = re.sub(r'^[•\-\d\.]+\s*', '', line).strip()
+                if cleaned_line:
+                    sections['suggested_fix'].append(cleaned_line)
+            elif line and not re.search(r'(?i)expected\s*improvement', line):
+                sections['suggested_fix'].append(line)
+                
+        elif current_section == 'expected_improvement' and not sections['expected_improvement']:
+            sections['expected_improvement'] = line
+    
+    # If sections are missing, try to extract them from the whole content
+    if not sections['observation']:
+        match = re.search(r'(?i)observation\s*:(.*?)(?:impact|$)', issue_content, re.DOTALL)
+        if match:
+            sections['observation'] = match.group(1).strip()
+            
+    if not sections['impact']:
+        match = re.search(r'(?i)impact\s*:(.*?)(?:suggested fix|$)', issue_content, re.DOTALL)
+        if match:
+            sections['impact'] = match.group(1).strip()
+            
+    if not sections['suggested_fix']:
+        match = re.search(r'(?i)suggested fix\s*:(.*?)(?:expected improvement|$)', issue_content, re.DOTALL)
+        if match:
+            content = match.group(1).strip()
+            lines = content.split('\n')
+            for line in lines:
+                line = line.strip()
+                if line.startswith('•') or line.startswith('-'):
+                    sections['suggested_fix'].append(re.sub(r'^[•\-]+\s*', '', line).strip())
+                elif line:
+                    sections['suggested_fix'].append(line)
+                    
+    if not sections['expected_improvement']:
+        match = re.search(r'(?i)expected improvement\s*:(.*?)$', issue_content, re.DOTALL)
+        if match:
+            sections['expected_improvement'] = match.group(1).strip()
+    
+    # Ensure HTML entities are properly escaped
+    for key in ['observation', 'impact', 'expected_improvement']:
+        sections[key] = sections[key].replace('<', '&lt;').replace('>', '&gt;')
+    
+    sections['suggested_fix'] = [item.replace('<', '&lt;').replace('>', '&gt;') for item in sections['suggested_fix']]
     
     # Determine impact level
     impact_level = 'medium'
@@ -579,30 +783,40 @@ def display_issue_card(issue_content, index):
     elif 'Low' in sections['impact']:
         impact_level = 'low'
     
-    # Clean and escape HTML content
-    title = f"Issue {index}: {title.split(':', 1)[1].strip() if ':' in title else title}"
+    # Clean and create title
+    title = f"Insight {index}: {title.split(':', 1)[1].strip() if ':' in title else title}"
     
-    # Render card with improved formatting and proper HTML escaping
+    # Ensure we have content for each section
+    if not sections['observation']:
+        sections['observation'] = "No specific observation provided"
+    if not sections['impact']:
+        sections['impact'] = "Impact level not specified"
+    if not sections['suggested_fix']:
+        sections['suggested_fix'] = ["No specific fixes suggested"]
+    if not sections['expected_improvement']:
+        sections['expected_improvement'] = "No specific improvement metrics provided"
+    
+    # Render card with improved formatting
     st.markdown(f"""
     <div class="issue-card impact-{impact_level}">
         <h3>{title}</h3>
         <div class="issue-section">
-            <div class="section-label">🎯 Problem</div>
-            <div class="section-content">{sections['problem']}</div>
+            <div class="section-label">🔍 Observation</div>
+            <div class="section-content">{sections['observation']}</div>
         </div>
         <div class="issue-section">
             <div class="section-label">📊 Impact</div>
             <div class="section-content">{sections['impact']}</div>
         </div>
         <div class="issue-section">
-            <div class="section-label">💡 Solution</div>
+            <div class="section-label">💡 Suggested Fix</div>
             <div class="section-content">
-                {''.join([f'<div class="solution-item">{item}</div>' for item in sections['solution']])}
+                {''.join([f'<div class="solution-item">{item}</div>' for item in sections['suggested_fix']])}
             </div>
         </div>
         <div class="issue-section">
-            <div class="section-label">📈 Expected Lift</div>
-            <div class="section-content">{sections['expected_lift']}</div>
+            <div class="section-label">📈 Expected Improvement</div>
+            <div class="section-content">{sections['expected_improvement']}</div>
         </div>
     </div>
     """, unsafe_allow_html=True)
@@ -670,10 +884,76 @@ if st.session_state.analysis_data.get(url):
     
     # Display issues
     analysis_content = st.session_state.analysis_data[url]
-    issues = [issue.strip() for issue in analysis_content.split("**Issue") if issue.strip()]
+    issues = [issue.strip() for issue in analysis_content.split("**Insight") if issue.strip()]
     
     for i, issue in enumerate(issues, 1):
         display_issue_card(issue, i)
     
     # Close grid container
     st.markdown("</div>", unsafe_allow_html=True)
+
+def enhanced_website_analysis(url):
+    """Comprehensive website analysis using Selenium, Lighthouse, BeautifulSoup and Requests"""
+    results = {
+        'structure': {},
+        'engagement': {},
+        'performance': {},
+        'accessibility': {},
+        'security': {}
+    }
+    
+    # 1. Security checks with Requests
+    try:
+        response = requests.get(url, timeout=10)
+        results['security']['https'] = url.startswith('https')
+        results['security']['status_code'] = response.status_code
+        results['security']['headers'] = {
+            'content-security-policy': 'Content-Security-Policy' in response.headers,
+            'strict-transport-security': 'Strict-Transport-Security' in response.headers,
+            'x-xss-protection': 'X-XSS-Protection' in response.headers
+        }
+    except Exception as e:
+        results['security']['error'] = str(e)
+    
+    # 2. Selenium for rendering and interaction analysis
+    options = Options()
+    options.add_argument('--headless')
+    options.add_argument('--disable-gpu')
+    
+    driver = webdriver.Chrome(options=options)
+    try:
+        start_time = time.time()
+        driver.get(url)
+        load_time = time.time() - start_time
+        results['performance']['load_time'] = load_time
+        
+        # Check for console errors
+        logs = driver.get_log('browser')
+        results['performance']['console_errors'] = [log for log in logs if log['level'] == 'SEVERE']
+        
+        # Check for broken images
+        images = driver.find_elements_by_tag_name('img')
+        broken_images = []
+        for img in images:
+            if img.get_attribute('naturalWidth') == '0':
+                broken_images.append(img.get_attribute('src'))
+        results['performance']['broken_images'] = broken_images
+        
+        # Check for forms and interaction elements
+        results['engagement']['forms'] = len(driver.find_elements_by_tag_name('form'))
+        results['engagement']['buttons'] = len(driver.find_elements_by_tag_name('button'))
+        results['engagement']['links'] = len(driver.find_elements_by_tag_name('a'))
+        
+        # Get page HTML for BeautifulSoup (which is already implemented in the app)
+        html = driver.page_source
+        
+    except Exception as e:
+        results['error'] = str(e)
+    finally:
+        driver.quit()
+    
+    # 3. Use Lighthouse API for comprehensive metrics
+    # Note: This would require setting up Lighthouse programmatically
+    # or using an API service that provides Lighthouse metrics
+    
+    return results
